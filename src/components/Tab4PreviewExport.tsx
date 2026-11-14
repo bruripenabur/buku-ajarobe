@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { BookOpenCheck, FileDown, Printer } from 'lucide-react';
+import { BookOpenCheck, FileDown, FileJson, Printer } from 'lucide-react';
 import type { PayloadBukuAjar } from '../types/book';
 import { exportBookToWordDoc } from '../utils/docExporter';
 
@@ -24,6 +24,24 @@ export const Tab4PreviewExport: React.FC<Tab4PreviewExportProps> = ({ book }) =>
     window.print();
   };
 
+  const handleDownloadJson = () => {
+    const safeName = (identitas.judulBuku || identitas.namaMk || 'buku-ajar-obe')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/(^-|-$)/g, '');
+    const blob = new Blob([JSON.stringify(book, null, 2)], {
+      type: 'application/json;charset=utf-8',
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${safeName || 'buku-ajar-obe'}-backup.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
   return (
     <div className="space-y-6">
       {/* Toolbar */}
@@ -33,7 +51,7 @@ export const Tab4PreviewExport: React.FC<Tab4PreviewExportProps> = ({ book }) =>
             Pratinjau Manuskrip Lengkap &amp; Ekspor Siap Cetak
           </h2>
           <p className="text-xs text-slate-600 mt-0.5">
-            Tata letak standar buku ajar perguruan tinggi (UNESCO B5 / A4).
+            Tata letak standar buku ajar perguruan tinggi (UNESCO B5 / A4) serta cadangan data JSON lokal.
           </p>
         </div>
 
@@ -49,6 +67,15 @@ export const Tab4PreviewExport: React.FC<Tab4PreviewExportProps> = ({ book }) =>
               <option value="A4">Standar A4 (210 × 297 mm)</option>
             </select>
           </label>
+
+          <button
+            type="button"
+            onClick={handleDownloadJson}
+            className="inline-flex items-center gap-2 px-4 py-2 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-slate-800 text-xs sm:text-sm font-semibold transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+          >
+            <FileJson className="w-4 h-4 text-[#0b3d91]" />
+            <span>Unduh Data JSON</span>
+          </button>
 
           <button
             type="button"

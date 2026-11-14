@@ -3,15 +3,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useEffect, useMemo, useState } from 'react';
-import type { Session, User } from '@supabase/supabase-js';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import type { Session } from '@supabase/supabase-js';
 import {
   AlertCircle,
   BookOpen,
   CheckCircle2,
   ClipboardList,
-  Database,
-  ExternalLink,
   FileText,
   Info,
   Layers,
@@ -19,6 +17,7 @@ import {
   X,
 } from 'lucide-react';
 import { SsoLockScreen } from './components/SsoLockScreen';
+import { SupabaseStatusBadge } from './components/SupabaseStatusBadge';
 import { Tab1IdentityMapping } from './components/Tab1IdentityMapping';
 import { Tab2ChapterEditor } from './components/Tab2ChapterEditor';
 import { Tab3EvaluationRefs } from './components/Tab3EvaluationRefs';
@@ -26,10 +25,10 @@ import { Tab4PreviewExport } from './components/Tab4PreviewExport';
 import { TopEcosystemBar } from './components/TopEcosystemBar';
 import {
   buildModuleHandoffUrl,
-  detectSsoSession,
-  extractSsoUserProfile,
+  extractUserProfile,
+  resolveSsoSession,
   signOutSso,
-  syncSsoCookie,
+  writeSsoCookie,
 } from './lib/ssoAuth';
 import {
   checkSupabaseConnection,
@@ -38,6 +37,7 @@ import {
   MODUL_3_SIRUBRIK_URL,
   saveBookToEcosystem,
   supabase,
+  type SupabaseConnectionStatus,
 } from './lib/supabase';
 import type { PayloadBukuAjar, RpsSummary } from './types/book';
 import { createEmptyManualBook, mapRpsToBookPayload } from './utils/rpsMapper';
@@ -50,15 +50,12 @@ interface ToastState {
 }
 
 export default function App() {
-  const [isCheckingSso, setIsCheckingSso] = useState<boolean>(true);
+  const [isCheckingAuth, setIsCheckingAuth] = useState<boolean>(true);
   const [session, setSession] = useState<Session | null>(null);
-  const [authUser, setAuthUser] = useState<User | null>(null);
-
-  const [dbStatus, setDbStatus] = useState<{
-    checked: boolean;
-    connected: boolean;
-    error?: string;
-  }>({ checked: false, connected: false });
+  const [dbStatus, setDbStatus] = useState<SupabaseConnectionStatus>({
+    state: 'checking',
+    message: 'Memeriksa Koneksi Supabase...',
+  });
 
   const [activeTab, setActiveTab] = useState<TabKey>('tab1');
   const [rpsList, setRpsList] = useState<RpsSummary[]>([]);
@@ -72,15 +69,49 @@ export default function App() {
 
   const [supabaseNotice, setSupabaseNotice] = useState<string | null>(null);
   const [toast, setToast] = useState<ToastState | null>(null);
-  const [handoffModalUrl, setHandoffModalUrl] = useState<string | null>(null);
 
   const [book, setBook] = useState<PayloadBukuAjar>(() => createEmptyManualBook());
 
-  const userProfile = useMemo(() => extractSsoUserProfile(authUser), [authUser]);
+  const userProfile = useMemo(
+    () => extractUserProfile(session?.user ?? null),
+    [session]
+  );
 
-  const notify = (type: ToastState['type'], message: string) => {
+  const notify = useCallback((type: ToastState['type'], message: string) => {
     setToast({ type, message });
-  };
+  }, []);
+
+  const applyUserAutofill = useCallback(
+    (payload: PayloadBukuAjar, profile = userProfile): PayloadBukuAjar => {
+      const nextPenulis = payload.identitas.timPenulis.trim() || profile.fullName;
+      const nextProdi = payload.identitas.programStudi.trim() || profile.prodi;
+      const nextTarget =
+        profile.prodi &&
+        payload.identitas.targetPembaca ===
+          'Mahasiswa Program Sarjana Universitas Pattimura'
+          ? `Mahasiswa Program Studi ${profile.prodi} — Universitas Pattimura`
+          : payload.identitas.targetPembaca;
+
+      if (
+        nextPenulis === payload.identitas.timPenulis &&
+        nextProdi === payload.identitas.programStudi &&
+        nextTarget === payload.identitas.targetPembaca
+      ) {
+        return payload;
+      }
+
+      return {
+        ...payload,
+        identitas: {
+          ...payload.identitas,
+          timPenulis: nextPenulis,
+          programStudi: nextProdi,
+          targetPembaca: nextTarget,
+        },
+      };
+    },
+    [userProfile]
+  );
 
   useEffect(() => {
     if (!toast) return;
@@ -88,125 +119,88 @@ export default function App() {
     return () => clearTimeout(timer);
   }, [toast]);
 
-  // 1. Deteksi Sesi SSO Otomatis + Listener Auth
+  const runDbCheck = useCallback(async () => {
+    setDbStatus({ state: 'checking', message: 'Memeriksa Koneksi Supabase...' });
+    const status = await checkSupabaseConnection();
+    setDbStatus(status);
+  }, []);
+
+  // 1. Resolve SSO session & subscribe to auth state changes
   useEffect(() => {
     let mounted = true;
 
-    async function initAuthAndConnection() {
-      setIsCheckingSso(true);
-      const [ssoRes, connRes] = await Promise.all([
-        detectSsoSession(),
-        checkSupabaseConnection(),
+    async function initAuthAndDb() {
+      setIsCheckingAuth(true);
+      const [resolvedSession] = await Promise.all([
+        resolveSsoSession(),
+        runDbCheck(),
       ]);
 
       if (!mounted) return;
-      setDbStatus({
-        checked: true,
-        connected: connRes.connected,
-        error: connRes.error,
-      });
-
-      if (ssoRes.session && ssoRes.user) {
-        setSession(ssoRes.session);
-        setAuthUser(ssoRes.user);
-      }
-      setIsCheckingSso(false);
+      setSession(resolvedSession);
+      setIsCheckingAuth(false);
     }
 
-    initAuthAndConnection();
+    initAuthAndDb();
 
-    const { data: authListener } = supabase.auth.onAuthStateChange((_event, nextSession) => {
-      if (!mounted) return;
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, nextSession) => {
       setSession(nextSession);
-      setAuthUser(nextSession?.user ?? null);
-      if (nextSession) {
-        syncSsoCookie(nextSession);
-      }
+      writeSsoCookie(nextSession);
     });
 
     return () => {
       mounted = false;
-      authListener.subscription.unsubscribe();
+      subscription.unsubscribe();
     };
-  }, []);
+  }, [runDbCheck]);
 
-  // Auto-fill Tim Penulis & Program Studi dari metadata pengguna SSO
+  // Auto-fill Tim Penulis & Program Studi once user profile is available
   useEffect(() => {
-    if (!authUser) return;
-    const profile = extractSsoUserProfile(authUser);
-    if (!profile.fullName && !profile.prodi) return;
+    if (!session?.user) return;
+    const profile = extractUserProfile(session.user);
+    setBook((prev) => applyUserAutofill(prev, profile));
+  }, [session, applyUserAutofill]);
 
-    setBook((prev) => {
-      const nextPenulis = prev.identitas.timPenulis.trim()
-        ? prev.identitas.timPenulis
-        : profile.fullName;
-      const nextProdi = prev.identitas.programStudi.trim()
-        ? prev.identitas.programStudi
-        : profile.prodi;
-      const nextTarget =
-        profile.prodi && prev.identitas.targetPembaca === 'Mahasiswa Program Sarjana Universitas Pattimura'
-          ? `Mahasiswa Program Studi ${profile.prodi} Universitas Pattimura`
-          : prev.identitas.targetPembaca;
+  const handleLoadRpsById = useCallback(
+    async (rpsId: string) => {
+      setIsLoadingSelectedRps(true);
+      setSelectedRpsId(rpsId);
+      setIsManualMode(false);
 
-      if (
-        nextPenulis === prev.identitas.timPenulis &&
-        nextProdi === prev.identitas.programStudi &&
-        nextTarget === prev.identitas.targetPembaca
-      ) {
-        return prev;
+      const { rps, existingBook, error } = await fetchRpsAndExistingBook(rpsId);
+      setIsLoadingSelectedRps(false);
+
+      if (error && !rps) {
+        notify('error', `Gagal menarik data RPS: ${error}`);
+        return;
       }
 
-      return {
-        ...prev,
-        identitas: {
-          ...prev.identitas,
-          timPenulis: nextPenulis,
-          programStudi: nextProdi,
-          targetPembaca: nextTarget,
-        },
-      };
-    });
-  }, [authUser]);
+      if (existingBook && existingBook.payload_buku) {
+        setBook(applyUserAutofill(existingBook.payload_buku));
+        setHasExistingDraft(true);
+        notify(
+          'info',
+          `Draf tersimpan "${existingBook.judul_buku}" dari tabel obe_buku_ajar berhasil dimuat.`
+        );
+        return;
+      }
 
-  const handleLoadRpsById = async (rpsId: string, currentUser?: User | null) => {
-    setIsLoadingSelectedRps(true);
-    setSelectedRpsId(rpsId);
-    setIsManualMode(false);
+      if (rps) {
+        const mapped = applyUserAutofill(mapRpsToBookPayload(rps));
+        setBook(mapped);
+        setHasExistingDraft(false);
+        notify(
+          'success',
+          `Data RPS ${rps.kode_mk} — ${rps.nama_mk} otomatis dipetakan menjadi ${mapped.babList.length} Bab Buku Ajar.`
+        );
+      }
+    },
+    [applyUserAutofill, notify]
+  );
 
-    const { rps, existingBook, error } = await fetchRpsAndExistingBook(rpsId);
-    setIsLoadingSelectedRps(false);
-
-    if (error && !rps) {
-      notify('error', `Gagal menarik data RPS: ${error}`);
-      return;
-    }
-
-    if (existingBook && existingBook.payload_buku) {
-      setBook(existingBook.payload_buku);
-      setHasExistingDraft(true);
-      notify(
-        'info',
-        `Draf tersimpan "${existingBook.judul_buku}" dari tabel obe_buku_ajar berhasil dimuat.`
-      );
-      return;
-    }
-
-    if (rps) {
-      const profile = extractSsoUserProfile(currentUser ?? authUser);
-      const mapped = mapRpsToBookPayload(rps, {
-        fullName: profile.fullName,
-        prodi: profile.prodi,
-      });
-      setBook(mapped);
-      setHasExistingDraft(false);
-      notify(
-        'success',
-        `Data RPS ${rps.kode_mk} — ${rps.nama_mk} otomatis dipetakan menjadi ${mapped.babList.length} Bab Buku Ajar.`
-      );
-    }
-  };
-
-  // Tarik daftar obe_rps & cek parameter ?rps_id=... setelah SSO aktif
+  // 2. Load upstream obe_rps list & ?rps_id=... once authenticated
   useEffect(() => {
     if (!session) return;
     let mounted = true;
@@ -222,13 +216,12 @@ export default function App() {
       } else {
         setSupabaseNotice(null);
         setRpsList(data);
-        setDbStatus({ checked: true, connected: true });
       }
 
       const params = new URLSearchParams(window.location.search);
       const urlRpsId = params.get('rps_id');
       if (urlRpsId) {
-        await handleLoadRpsById(urlRpsId, session?.user);
+        await handleLoadRpsById(urlRpsId);
       }
     }
 
@@ -236,22 +229,22 @@ export default function App() {
     return () => {
       mounted = false;
     };
-  }, [session]);
+  }, [session, handleLoadRpsById]);
 
   const handleSwitchManual = () => {
     setSelectedRpsId(null);
     setIsManualMode(true);
     setHasExistingDraft(false);
-    setBook(
-      createEmptyManualBook({
-        fullName: userProfile.fullName,
-        prodi: userProfile.prodi,
-      })
-    );
+    setBook(applyUserAutofill(createEmptyManualBook()));
     notify(
       'info',
-      'Mode Input Manual aktif. Identitas penulis dan program studi diisi otomatis dari profil SSO Anda.'
+      'Mode Input Manual aktif. Identitas dosen dan program studi telah diisi otomatis dari profil SSO.'
     );
+  };
+
+  const handleSignOut = async () => {
+    await signOutSso();
+    setSession(null);
   };
 
   const handleSaveAndContinue = async () => {
@@ -276,27 +269,21 @@ export default function App() {
       return;
     }
 
-    const rpsParam = selectedRpsId || savedId || '';
-    const targetUrl = buildModuleHandoffUrl(MODUL_3_SIRUBRIK_URL, rpsParam, session);
+    const rpsParam = selectedRpsId || savedId || null;
+    const targetUrl = buildModuleHandoffUrl(
+      MODUL_3_SIRUBRIK_URL,
+      rpsParam,
+      session
+    );
 
     notify(
       'success',
-      'Buku ajar berhasil disimpan ke tabel obe_buku_ajar dan status siklus RPS diperbarui menjadi 2_buku_selesai.'
+      'Buku ajar berhasil disimpan ke tabel obe_buku_ajar dan status siklus RPS diperbarui menjadi 2_buku_selesai. Mengarahkan ke SIRUBRIK...'
     );
 
-    if (!MODUL_3_SIRUBRIK_URL.includes('[MASUKKAN_')) {
-      setTimeout(() => {
-        window.location.href = targetUrl;
-      }, 1100);
-    } else {
-      setHandoffModalUrl(targetUrl);
-    }
-  };
-
-  const handleSignOut = async () => {
-    await signOutSso();
-    setSession(null);
-    setAuthUser(null);
+    setTimeout(() => {
+      window.location.href = targetUrl;
+    }, 1000);
   };
 
   const tabs: Array<{ key: TabKey; label: string; icon: typeof BookOpen }> = [
@@ -306,31 +293,31 @@ export default function App() {
     { key: 'tab4', label: '4. Pratinjau Manuskrip & Ekspor', icon: FileText },
   ];
 
-  // Layar tunggu saat memeriksa sesi SSO
-  if (isCheckingSso) {
+  if (isCheckingAuth) {
     return (
-      <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center p-6">
-        <div className="bg-white border border-slate-200 rounded-xl px-6 py-5 flex items-center gap-3 shadow-sm">
-          <Loader2 className="w-5 h-5 animate-spin text-[#0b3d91]" />
-          <span className="text-sm font-semibold text-slate-800">
-            Memeriksa sesi Single Sign-On (SSO) Ekosistem SIMPEL-OBE...
-          </span>
-        </div>
+      <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center p-6 text-slate-700">
+        <Loader2 className="w-8 h-8 animate-spin text-[#0b3d91] mb-3" />
+        <p className="text-sm font-semibold text-slate-900">
+          Memeriksa Sesi SSO Ekosistem SIMPEL-OBE...
+        </p>
+        <p className="text-xs text-slate-500 mt-1">
+          Menghubungkan ke obe.simpatti.site &amp; database Supabase
+        </p>
+        <SupabaseStatusBadge status={dbStatus} onRetry={runDbCheck} />
       </div>
     );
   }
 
-  // Layar kunci SSO jika belum login
-  if (!session || !authUser) {
+  if (!session) {
     return (
       <>
         <SsoLockScreen
-          onAuthenticated={(newSession, newUser) => {
-            setSession(newSession);
-            setAuthUser(newUser);
+          onAuthenticated={async () => {
+            const nextSession = await resolveSsoSession();
+            setSession(nextSession);
           }}
         />
-        <DbConnectionStatusBadge dbStatus={dbStatus} />
+        <SupabaseStatusBadge status={dbStatus} onRetry={runDbCheck} />
       </>
     );
   }
@@ -346,7 +333,7 @@ export default function App() {
         isSaving={isSaving}
         hasExistingDraft={hasExistingDraft}
         userProfile={userProfile}
-        onSelectRps={(id) => handleLoadRpsById(id)}
+        onSelectRps={handleLoadRpsById}
         onSwitchManual={handleSwitchManual}
         onSaveAndContinue={handleSaveAndContinue}
         onSignOut={handleSignOut}
@@ -436,14 +423,14 @@ export default function App() {
             Pusat Kurikulum dan Inovasi Pembelajaran · Universitas Pattimura
           </span>
           <span>
-            Ekosistem SIMPEL-OBE · Tahap 2: Penyusunan Buku Ajar Akademik
+            Ekosistem SIMPEL-OBE · Tahap 2: Penyusunan Buku Ajar Akademik (`bukuajar.simpatti.site`)
           </span>
         </div>
       </footer>
 
       {/* Toast Notification */}
       {toast && (
-        <div className="no-print fixed bottom-16 right-5 z-50 max-w-md rounded-xl border bg-white shadow-lg p-4 flex items-start gap-3 border-slate-200">
+        <div className="no-print fixed bottom-14 right-5 z-50 max-w-md rounded-xl border bg-white shadow-lg p-4 flex items-start gap-3 border-slate-200">
           {toast.type === 'success' && (
             <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0 mt-0.5" />
           )}
@@ -464,86 +451,8 @@ export default function App() {
         </div>
       )}
 
-      {/* Handoff Confirmation Modal */}
-      {handoffModalUrl && (
-        <div className="no-print fixed inset-0 z-50 bg-slate-900/50 flex items-center justify-center p-4">
-          <div className="bg-white border border-slate-200 rounded-xl max-w-lg w-full p-6 space-y-4 shadow-xl">
-            <div className="flex items-start justify-between gap-3">
-              <div className="flex items-center gap-2.5 text-emerald-700">
-                <CheckCircle2 className="w-5 h-5" />
-                <h3 className="text-base font-bold text-slate-900">
-                  Buku Ajar Tersimpan ke Ekosistem
-                </h3>
-              </div>
-              <button
-                type="button"
-                onClick={() => setHandoffModalUrl(null)}
-                className="text-slate-400 hover:text-slate-700 cursor-pointer"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-            <p className="text-sm text-slate-700 leading-relaxed">
-              Data buku ajar telah disimpan ke tabel{' '}
-              <code className="font-mono text-xs bg-slate-100 px-1.5 py-0.5 rounded">
-                obe_buku_ajar
-              </code>{' '}
-              dan status siklus RPS diperbarui menjadi{' '}
-              <code className="font-mono text-xs bg-slate-100 px-1.5 py-0.5 rounded">
-                2_buku_selesai
-              </code>
-              .
-            </p>
-            <div className="flex justify-end gap-2 pt-2">
-              <button
-                type="button"
-                onClick={() => setHandoffModalUrl(null)}
-                className="px-4 py-2 rounded-lg border border-slate-300 text-xs font-semibold text-slate-700 hover:bg-slate-50 cursor-pointer"
-              >
-                Tutup
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  window.location.href = handoffModalUrl;
-                }}
-                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-[#0b3d91] text-white text-xs font-semibold hover:bg-[#092f72] cursor-pointer"
-              >
-                <span>Buka URL SIRUBRIK</span>
-                <ExternalLink className="w-3.5 h-3.5" />
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      <DbConnectionStatusBadge dbStatus={dbStatus} />
-    </div>
-  );
-}
-
-function DbConnectionStatusBadge({
-  dbStatus,
-}: {
-  dbStatus: { checked: boolean; connected: boolean; error?: string };
-}) {
-  if (!dbStatus.checked) return null;
-
-  return (
-    <div
-      title={dbStatus.error || 'Terhubung ke Supabase SIMPEL-OBE'}
-      className={`no-print fixed bottom-3.5 right-4 z-40 inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs font-medium shadow-sm ${
-        dbStatus.connected
-          ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
-          : 'bg-red-50 border-red-200 text-red-800'
-      }`}
-    >
-      <Database className="w-3.5 h-3.5 shrink-0" />
-      <span>
-        {dbStatus.connected
-          ? 'Supabase Connected (SIMPEL-OBE DB)'
-          : `Supabase Disconnected${dbStatus.error ? `: ${dbStatus.error}` : ''}`}
-      </span>
+      {/* Diagnostic Status Badge */}
+      <SupabaseStatusBadge status={dbStatus} onRetry={runDbCheck} />
     </div>
   );
 }

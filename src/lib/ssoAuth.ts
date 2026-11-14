@@ -1,8 +1,13 @@
 import type { Session, User } from '@supabase/supabase-js';
-import { supabase } from './supabase';
+import { SIMPATTI_URLS, supabase } from './supabase';
 
 export const SSO_COOKIE_NAME = 'simpatti_sso_session';
 export const SSO_COOKIE_DOMAIN = '.simpatti.site';
+
+export interface SsoTokens {
+  access_token: string;
+  refresh_token: string;
+}
 
 export interface SsoUserProfile {
   fullName: string;
@@ -10,248 +15,216 @@ export interface SsoUserProfile {
   email: string;
 }
 
-interface TokenPair {
-  access_token: string;
-  refresh_token: string;
-}
-
-function parseTokenPayload(raw: string): TokenPair | null {
+function parseTokenPayload(raw: string): SsoTokens | null {
   if (!raw) return null;
-  const trimmed = raw.trim();
-  const candidates = [trimmed];
+  const candidates: string[] = [raw];
 
   try {
-    candidates.push(decodeURIComponent(trimmed));
+    candidates.push(decodeURIComponent(raw));
   } catch {
-    // ignore decode errors
-  }
-
-  try {
-    candidates.push(atob(trimmed));
-  } catch {
-    // ignore base64 errors
+    // ignore decode failure
   }
 
   for (const candidate of candidates) {
+    // 1. Try JSON directly
     try {
-      const parsed = JSON.parse(candidate) as Record<string, unknown>;
-      if (
-        parsed &&
-        typeof parsed.access_token === 'string' &&
-        typeof parsed.refresh_token === 'string' &&
-        parsed.access_token &&
-        parsed.refresh_token
-      ) {
+      const parsed = JSON.parse(candidate);
+      if (parsed?.access_token && parsed?.refresh_token) {
         return {
-          access_token: parsed.access_token,
-          refresh_token: parsed.refresh_token,
+          access_token: String(parsed.access_token),
+          refresh_token: String(parsed.refresh_token),
         };
       }
     } catch {
-      // try next candidate
+      // not direct JSON
     }
-  }
 
-  // Fallback for delimiter-separated "access_token|refresh_token"
-  if (trimmed.includes('|')) {
-    const [access_token, refresh_token] = trimmed.split('|');
-    if (access_token && refresh_token) {
-      return { access_token, refresh_token };
+    // 2. Try Base64-encoded JSON
+    try {
+      const decoded = atob(candidate);
+      const parsed = JSON.parse(decoded);
+      if (parsed?.access_token && parsed?.refresh_token) {
+        return {
+          access_token: String(parsed.access_token),
+          refresh_token: String(parsed.refresh_token),
+        };
+      }
+    } catch {
+      // not base64 JSON
+    }
+
+    // 3. Try query-string style access_token=...&refresh_token=...
+    try {
+      const params = new URLSearchParams(candidate);
+      const access = params.get('access_token');
+      const refresh = params.get('refresh_token');
+      if (access && refresh) {
+        return { access_token: access, refresh_token: refresh };
+      }
+    } catch {
+      // ignore
     }
   }
 
   return null;
 }
 
-function readCookie(name: string): string | null {
+function readHashTokens(): SsoTokens | null {
+  if (typeof window === 'undefined') return null;
+  const hash = window.location.hash;
+  if (!hash || hash.length < 2) return null;
+
+  const cleanHash = hash.startsWith('#') ? hash.slice(1) : hash;
+
+  if (cleanHash.includes('sso_token=')) {
+    const params = new URLSearchParams(cleanHash);
+    const ssoRaw = params.get('sso_token');
+    if (ssoRaw) {
+      const parsed = parseTokenPayload(ssoRaw);
+      if (parsed) return parsed;
+    }
+    const idx = cleanHash.indexOf('sso_token=');
+    const fallbackRaw = cleanHash.slice(idx + 'sso_token='.length);
+    const parsed = parseTokenPayload(fallbackRaw);
+    if (parsed) return parsed;
+  }
+
+  return parseTokenPayload(cleanHash);
+}
+
+function clearHashFromUrl(): void {
+  if (typeof window === 'undefined') return;
+  if (window.location.hash) {
+    const cleanUrl = `${window.location.pathname}${window.location.search}`;
+    window.history.replaceState(null, '', cleanUrl);
+  }
+}
+
+export function readSsoCookie(): SsoTokens | null {
   if (typeof document === 'undefined') return null;
-  const cookies = document.cookie ? document.cookie.split('; ') : [];
-  for (const c of cookies) {
-    const eqIndex = c.indexOf('=');
-    if (eqIndex === -1) continue;
-    const key = c.slice(0, eqIndex).trim();
-    if (key === name) {
-      return c.slice(eqIndex + 1);
+  const cookies = document.cookie ? document.cookie.split(';') : [];
+  for (const cookie of cookies) {
+    const trimmed = cookie.trim();
+    if (trimmed.startsWith(`${SSO_COOKIE_NAME}=`)) {
+      const value = trimmed.slice(SSO_COOKIE_NAME.length + 1);
+      return parseTokenPayload(value);
     }
   }
   return null;
 }
 
-export function syncSsoCookie(session: Session | null): void {
-  if (typeof document === 'undefined' || !session) return;
+export function writeSsoCookie(session: Session | null): void {
+  if (typeof document === 'undefined') return;
+  const isSimpattiDomain =
+    typeof window !== 'undefined' &&
+    window.location.hostname.endsWith('simpatti.site');
+  const domainAttr = isSimpattiDomain ? `; domain=${SSO_COOKIE_DOMAIN}` : '';
+  const secureAttr =
+    typeof window !== 'undefined' && window.location.protocol === 'https:'
+      ? '; Secure'
+      : '';
+
+  if (!session?.access_token || !session?.refresh_token) {
+    document.cookie = `${SSO_COOKIE_NAME}=; path=/${domainAttr}; max-age=0; SameSite=Lax${secureAttr}`;
+    return;
+  }
+
   const payload = encodeURIComponent(
     JSON.stringify({
       access_token: session.access_token,
       refresh_token: session.refresh_token,
     })
   );
-  const maxAge = 60 * 60 * 24 * 7; // 7 days
-  const isSimpattiDomain = window.location.hostname.endsWith('simpatti.site');
-  const secureFlag = window.location.protocol === 'https:' ? '; Secure' : '';
-
-  if (isSimpattiDomain) {
-    document.cookie = `${SSO_COOKIE_NAME}=${payload}; Domain=${SSO_COOKIE_DOMAIN}; Path=/; Max-Age=${maxAge}; SameSite=Lax${secureFlag}`;
-  } else {
-    document.cookie = `${SSO_COOKIE_NAME}=${payload}; Path=/; Max-Age=${maxAge}; SameSite=Lax${secureFlag}`;
-  }
+  // 7 days expiry
+  document.cookie = `${SSO_COOKIE_NAME}=${payload}; path=/${domainAttr}; max-age=604800; SameSite=Lax${secureAttr}`;
 }
 
-export function clearSsoCookie(): void {
-  if (typeof document === 'undefined') return;
-  const isSimpattiDomain = window.location.hostname.endsWith('simpatti.site');
-  if (isSimpattiDomain) {
-    document.cookie = `${SSO_COOKIE_NAME}=; Domain=${SSO_COOKIE_DOMAIN}; Path=/; Max-Age=0; SameSite=Lax`;
-  }
-  document.cookie = `${SSO_COOKIE_NAME}=; Path=/; Max-Age=0; SameSite=Lax`;
-}
-
-export function extractSsoUserProfile(user: User | null): SsoUserProfile {
-  if (!user) {
-    return { fullName: '', prodi: '', email: '' };
-  }
-  const meta = (user.user_metadata || {}) as Record<string, unknown>;
+export function extractUserProfile(user: User | null): SsoUserProfile {
+  const meta = (user?.user_metadata || {}) as Record<string, unknown>;
   const fullName = String(
-    meta.full_name || meta.nama_lengkap || meta.name || user.email || ''
+    meta.full_name || meta.nama_lengkap || meta.name || user?.email || ''
   ).trim();
   const prodi = String(
     meta.prodi || meta.program_studi || meta.department || ''
   ).trim();
-
   return {
     fullName,
     prodi,
-    email: user.email || '',
+    email: user?.email || '',
   };
 }
 
 /**
- * Deteksi sesi SSO otomatis sesuai urutan:
- * 1. Sesi aktif bawaan supabase.auth.getSession()
- * 2. Hash URL #sso_token=... (lalu bersihkan hash dari URL)
- * 3. Cookie lintas subdomain simpatti_sso_session pada .simpatti.site
+ * Resolve SSO session in priority order:
+ * 1. Existing supabase.auth.getSession()
+ * 2. URL hash #sso_token=... -> setSession + clear hash
+ * 3. Cross-subdomain cookie simpatti_sso_session -> setSession
  */
-export async function detectSsoSession(): Promise<{
-  session: Session | null;
-  user: User | null;
-  source: 'supabase' | 'hash' | 'cookie' | 'none';
-}> {
-  // 1. Sesi aktif bawaan Supabase
-  try {
-    const { data } = await supabase.auth.getSession();
-    if (data?.session) {
-      syncSsoCookie(data.session);
-      return {
-        session: data.session,
-        user: data.session.user,
-        source: 'supabase',
-      };
-    }
-  } catch {
-    // continue to next source
+export async function resolveSsoSession(): Promise<Session | null> {
+  // 1. Check active Supabase session
+  const { data: currentData } = await supabase.auth.getSession();
+  if (currentData?.session) {
+    writeSsoCookie(currentData.session);
+    return currentData.session;
   }
 
-  // 2. Hash URL #sso_token=...
-  if (typeof window !== 'undefined' && window.location.hash) {
-    const rawHash = window.location.hash.replace(/^#/, '');
-    const hashParams = new URLSearchParams(rawHash);
-    const ssoTokenRaw = hashParams.get('sso_token');
-
-    if (ssoTokenRaw) {
-      let tokenPair = parseTokenPayload(ssoTokenRaw);
-      if (!tokenPair && hashParams.get('refresh_token')) {
-        tokenPair = {
-          access_token: ssoTokenRaw,
-          refresh_token: hashParams.get('refresh_token') || '',
-        };
-      }
-
-      // Bersihkan hash dari bilah alamat URL
-      window.history.replaceState(
-        null,
-        '',
-        `${window.location.pathname}${window.location.search}`
-      );
-
-      if (tokenPair) {
-        const { data, error } = await supabase.auth.setSession({
-          access_token: tokenPair.access_token,
-          refresh_token: tokenPair.refresh_token,
-        });
-        if (!error && data?.session) {
-          syncSsoCookie(data.session);
-          return {
-            session: data.session,
-            user: data.session.user,
-            source: 'hash',
-          };
-        }
-      }
+  // 2. Check #sso_token=... hash
+  const hashTokens = readHashTokens();
+  if (hashTokens) {
+    const { data, error } = await supabase.auth.setSession({
+      access_token: hashTokens.access_token,
+      refresh_token: hashTokens.refresh_token,
+    });
+    clearHashFromUrl();
+    if (!error && data?.session) {
+      writeSsoCookie(data.session);
+      return data.session;
     }
   }
 
-  // 3. Cookie lintas subdomain simpatti_sso_session (.simpatti.site)
-  const cookieRaw = readCookie(SSO_COOKIE_NAME);
-  if (cookieRaw) {
-    const tokenPair = parseTokenPayload(cookieRaw);
-    if (tokenPair) {
-      const { data, error } = await supabase.auth.setSession({
-        access_token: tokenPair.access_token,
-        refresh_token: tokenPair.refresh_token,
-      });
-      if (!error && data?.session) {
-        return {
-          session: data.session,
-          user: data.session.user,
-          source: 'cookie',
-        };
-      }
+  // 3. Check cross-subdomain cookie simpatti_sso_session
+  const cookieTokens = readSsoCookie();
+  if (cookieTokens) {
+    const { data, error } = await supabase.auth.setSession({
+      access_token: cookieTokens.access_token,
+      refresh_token: cookieTokens.refresh_token,
+    });
+    if (!error && data?.session) {
+      return data.session;
     }
   }
 
-  return { session: null, user: null, source: 'none' };
-}
-
-export async function signInWithEmailPassword(
-  email: string,
-  password: string
-): Promise<{ session: Session | null; user: User | null; error: string | null }> {
-  const { data, error } = await supabase.auth.signInWithPassword({
-    email: email.trim(),
-    password,
-  });
-
-  if (error || !data.session) {
-    return {
-      session: null,
-      user: null,
-      error: error?.message || 'Gagal login. Periksa kembali email dan kata sandi Anda.',
-    };
-  }
-
-  syncSsoCookie(data.session);
-  return { session: data.session, user: data.session.user, error: null };
+  return null;
 }
 
 export async function signOutSso(): Promise<void> {
-  clearSsoCookie();
+  writeSsoCookie(null);
   await supabase.auth.signOut();
 }
 
 export function buildModuleHandoffUrl(
-  targetSubdomainUrl: string,
+  baseUrl: string,
   rpsId: string | null,
   session: Session | null
 ): string {
-  const base = targetSubdomainUrl.replace(/\/+$/, '');
-  const query = rpsId ? `?rps_id=${encodeURIComponent(rpsId)}` : '';
-  if (!session) {
-    return `${base}${query}`;
+  const url = new URL(baseUrl);
+  if (rpsId) {
+    url.searchParams.set('rps_id', rpsId);
   }
-  const ssoPayload = encodeURIComponent(
-    JSON.stringify({
-      access_token: session.access_token,
-      refresh_token: session.refresh_token,
-    })
-  );
-  return `${base}${query}#sso_token=${ssoPayload}`;
+  if (session?.access_token && session?.refresh_token) {
+    const ssoPayload = encodeURIComponent(
+      JSON.stringify({
+        access_token: session.access_token,
+        refresh_token: session.refresh_token,
+      })
+    );
+    url.hash = `sso_token=${ssoPayload}`;
+  }
+  return url.toString();
+}
+
+export function getPortalLoginUrl(): string {
+  if (typeof window === 'undefined') return SIMPATTI_URLS.portal;
+  const redirect = encodeURIComponent(window.location.href);
+  return `${SIMPATTI_URLS.portal}?redirect_to=${redirect}`;
 }

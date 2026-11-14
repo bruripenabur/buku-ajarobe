@@ -5,11 +5,10 @@ export const SUPABASE_URL =
   import.meta.env.VITE_SUPABASE_URL || 'https://eysccwxpgdcoqfvaalye.supabase.co';
 
 export const SUPABASE_ANON_KEY =
-  import.meta.env.VITE_SUPABASE_ANON_KEY || 'sb_publishable_z-P7ucdZVBwh8dH4kcU7Pg_mH6vL9P8';
+  import.meta.env.VITE_SUPABASE_ANON_KEY ||
+  'sb_publishable_z-P7ucdZVBwh8dH4kcU7Pg_mH6vL9P8';
 
-export const PORTAL_OBE_URL = 'https://obe.simpatti.site';
-
-export const ECOSYSTEM_SUBDOMAINS = {
+export const SIMPATTI_URLS = {
   portal: 'https://obe.simpatti.site',
   kurikulum: 'https://kurikulum.simpatti.site',
   rps: 'https://rps.simpatti.site',
@@ -21,48 +20,42 @@ export const ECOSYSTEM_SUBDOMAINS = {
 } as const;
 
 export const MODUL_3_SIRUBRIK_URL =
-  import.meta.env.VITE_SIRUBRIK_URL || ECOSYSTEM_SUBDOMAINS.rubrik;
-
-export function isSupabaseKeyConfigured(): boolean {
-  return (
-    Boolean(SUPABASE_ANON_KEY) &&
-    !SUPABASE_ANON_KEY.includes('[MASUKKAN_') &&
-    SUPABASE_ANON_KEY.length > 20
-  );
-}
+  import.meta.env.VITE_SIRUBRIK_URL || SIMPATTI_URLS.rubrik;
 
 export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-export async function checkSupabaseConnection(): Promise<{
-  connected: boolean;
-  error?: string;
-}> {
-  if (!isSupabaseKeyConfigured()) {
-    return { connected: false, error: 'Publishable key Supabase belum dikonfigurasi.' };
-  }
+export interface SupabaseConnectionStatus {
+  state: 'checking' | 'connected' | 'error';
+  message: string;
+}
+
+export async function checkSupabaseConnection(): Promise<SupabaseConnectionStatus> {
   try {
-    const { error } = await supabase.from('obe_rps').select('id').limit(1);
+    const { error } = await supabase
+      .from('obe_rps')
+      .select('id', { count: 'exact', head: true })
+      .limit(1);
+
     if (error) {
-      return { connected: false, error: error.message };
+      return {
+        state: 'error',
+        message: error.message || 'Gagal memverifikasi koneksi Supabase.',
+      };
     }
-    return { connected: true };
+
+    return {
+      state: 'connected',
+      message: 'Supabase Connected (SIMPEL-OBE DB)',
+    };
   } catch (err) {
     return {
-      connected: false,
-      error: err instanceof Error ? err.message : 'Gagal terhubung ke Supabase.',
+      state: 'error',
+      message: err instanceof Error ? err.message : 'Koneksi Supabase terputus.',
     };
   }
 }
 
 export async function fetchRpsList(): Promise<{ data: RpsSummary[]; error: string | null }> {
-  if (!isSupabaseKeyConfigured()) {
-    return {
-      data: [],
-      error:
-        'Publishable key Supabase belum diisi pada src/lib/supabase.ts atau VITE_SUPABASE_ANON_KEY. Gunakan Mode Input Manual atau lengkapi kunci Supabase untuk menarik data RPS.',
-    };
-  }
-
   try {
     const { data, error } = await supabase
       .from('obe_rps')
@@ -86,14 +79,6 @@ export async function fetchRpsAndExistingBook(rpsId: string): Promise<{
   existingBook: { id?: string; judul_buku: string; payload_buku: PayloadBukuAjar } | null;
   error: string | null;
 }> {
-  if (!isSupabaseKeyConfigured()) {
-    return {
-      rps: null,
-      existingBook: null,
-      error: 'Publishable key Supabase belum dikonfigurasi.',
-    };
-  }
-
   try {
     const [rpsRes, bookRes] = await Promise.all([
       supabase.from('obe_rps').select('*').eq('id', rpsId).maybeSingle(),
@@ -129,13 +114,6 @@ export async function saveBookToEcosystem(params: {
   judulBuku: string;
   payloadBuku: PayloadBukuAjar;
 }): Promise<{ savedId?: string; error: string | null }> {
-  if (!isSupabaseKeyConfigured()) {
-    return {
-      error:
-        'Kunci Supabase belum dikonfigurasi. Lengkapi SUPABASE_ANON_KEY di src/lib/supabase.ts atau VITE_SUPABASE_ANON_KEY untuk menyimpan ke database ekosistem.',
-    };
-  }
-
   try {
     if (params.rpsId) {
       const { data: upsertData, error: upsertError } = await supabase

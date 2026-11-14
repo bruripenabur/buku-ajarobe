@@ -8,10 +8,10 @@ import {
   FileEdit,
   Loader2,
   LogOut,
-  UserCircle2,
+  UserCheck,
 } from 'lucide-react';
 import type { SsoUserProfile } from '../lib/ssoAuth';
-import { PORTAL_OBE_URL } from '../lib/supabase';
+import { SIMPATTI_URLS } from '../lib/supabase';
 import type { RpsSummary } from '../types/book';
 
 const UNPATTI_LOGO_URL =
@@ -51,7 +51,7 @@ export const TopEcosystemBar: React.FC<TopEcosystemBarProps> = ({
   return (
     <header className="no-print lg:sticky lg:top-0 z-40 bg-[#0b3d91] text-white border-b-2 border-[#ffcc00] shadow-sm">
       <div className="max-w-[1440px] mx-auto px-4 sm:px-6 py-3 flex flex-col gap-3">
-        {/* Row 1: Institutional Identity + SSO Identity & Primary Action */}
+        {/* Row 1: Institutional Identity + User SSO Identity & Portal Navigation */}
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div className="flex items-center gap-3.5 min-w-0">
             <div className="w-11 h-11 rounded-lg bg-white/95 p-1 flex items-center justify-center shrink-0 border border-[#ffcc00]/60">
@@ -82,59 +82,42 @@ export const TopEcosystemBar: React.FC<TopEcosystemBarProps> = ({
             </div>
           </div>
 
+          {/* Right Header Zone: User Profile + Portal & SignOut */}
           <div className="flex flex-wrap items-center gap-2.5 shrink-0">
-            {/* SSO User Info + Portal & Sign Out */}
-            <div className="flex items-center gap-2.5 bg-[#0f172a]/50 border border-white/15 rounded-lg px-3 py-1.5 text-xs">
-              <UserCircle2 className="w-4 h-4 text-[#ffcc00] shrink-0" />
-              <div className="leading-tight max-w-[200px]">
-                <p className="font-semibold text-white truncate">
+            <div className="flex items-center gap-2 rounded-lg bg-[#0f172a]/55 border border-white/15 px-3 py-1.5 text-xs">
+              <UserCheck className="w-3.5 h-3.5 text-[#ffcc00] shrink-0" />
+              <div className="leading-tight">
+                <p className="font-semibold text-white whitespace-nowrap max-w-[190px] truncate">
                   {userProfile.fullName || userProfile.email || 'Dosen Pengampu'}
                 </p>
-                <p className="text-[11px] text-blue-100/80 truncate">
-                  {userProfile.prodi || 'Universitas Pattimura'}
-                </p>
+                {userProfile.prodi && (
+                  <p className="text-[11px] text-blue-200 whitespace-nowrap max-w-[190px] truncate">
+                    {userProfile.prodi}
+                  </p>
+                )}
               </div>
-              <span className="text-white/25" aria-hidden="true">|</span>
-              <a
-                href={PORTAL_OBE_URL}
-                className="inline-flex items-center gap-1 text-blue-100 hover:text-[#ffcc00] font-medium whitespace-nowrap transition-colors"
-              >
-                <ArrowLeft className="w-3.5 h-3.5" />
-                <span>Kembali ke Portal OBE</span>
-              </a>
-              <span className="text-white/25" aria-hidden="true">|</span>
-              <button
-                type="button"
-                onClick={onSignOut}
-                className="inline-flex items-center gap-1 text-red-200 hover:text-white font-medium whitespace-nowrap transition-colors cursor-pointer"
-              >
-                <LogOut className="w-3.5 h-3.5" />
-                <span>Keluar</span>
-              </button>
             </div>
+
+            <a
+              href={SIMPATTI_URLS.portal}
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-white/10 hover:bg-white/20 border border-white/20 text-white text-xs font-medium transition-colors whitespace-nowrap shrink-0"
+            >
+              <ArrowLeft className="w-3.5 h-3.5" />
+              <span>← Kembali ke Portal OBE</span>
+            </a>
 
             <button
               type="button"
-              onClick={onSaveAndContinue}
-              disabled={isSaving}
-              className="inline-flex items-center gap-2 px-4 py-2.5 rounded-lg bg-[#ffcc00] hover:bg-[#eab308] disabled:opacity-60 text-[#0f172a] font-semibold text-xs sm:text-sm transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              onClick={onSignOut}
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-red-500/20 hover:bg-red-500/35 border border-red-300/30 text-white text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
-              {isSaving ? (
-                <>
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                  <span>Menyimpan ke Ekosistem...</span>
-                </>
-              ) : (
-                <>
-                  <span>Simpan Buku Ajar ke Ekosistem &amp; Lanjut ke SIRUBRIK</span>
-                  <ArrowRight className="w-4 h-4" />
-                </>
-              )}
+              <LogOut className="w-3.5 h-3.5" />
+              <span>Keluar</span>
             </button>
           </div>
         </div>
 
-        {/* Row 2: Upstream Connector (obe_rps dropdown + Manual mode) */}
+        {/* Row 2: Upstream Connector (obe_rps dropdown + Manual mode + Primary Handoff CTA) */}
         <div className="flex flex-wrap items-center justify-between gap-3 pt-2.5 border-t border-white/15">
           <div className="flex flex-wrap items-center gap-2.5 flex-1 min-w-[260px]">
             <label
@@ -187,7 +170,7 @@ export const TopEcosystemBar: React.FC<TopEcosystemBarProps> = ({
             )}
           </div>
 
-          <div className="flex items-center gap-3 text-xs text-blue-100">
+          <div className="flex flex-wrap items-center gap-2.5 text-xs text-blue-100 shrink-0">
             {selectedRpsId && !isManualMode && (
               <span className="whitespace-nowrap">
                 {hasExistingDraft
@@ -198,7 +181,7 @@ export const TopEcosystemBar: React.FC<TopEcosystemBarProps> = ({
             <button
               type="button"
               onClick={onSwitchManual}
-              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+              className={`inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                 isManualMode
                   ? 'bg-white text-[#0b3d91]'
                   : 'bg-white/10 hover:bg-white/20 text-white border border-white/20'
@@ -206,6 +189,25 @@ export const TopEcosystemBar: React.FC<TopEcosystemBarProps> = ({
             >
               <FileEdit className="w-3.5 h-3.5" />
               <span>Input Manual Tanpa RPS</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={onSaveAndContinue}
+              disabled={isSaving}
+              className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-[#ffcc00] hover:bg-[#eab308] disabled:opacity-60 text-[#0f172a] font-semibold text-xs sm:text-sm transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              {isSaving ? (
+                <>
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  <span>Menyimpan ke Ekosistem...</span>
+                </>
+              ) : (
+                <>
+                  <span>Simpan Buku Ajar ke Ekosistem &amp; Lanjut ke SIRUBRIK</span>
+                  <ArrowRight className="w-4 h-4" />
+                </>
+              )}
             </button>
           </div>
         </div>
