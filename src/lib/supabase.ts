@@ -5,10 +5,23 @@ export const SUPABASE_URL =
   import.meta.env.VITE_SUPABASE_URL || 'https://eysccwxpgdcoqfvaalye.supabase.co';
 
 export const SUPABASE_ANON_KEY =
-  import.meta.env.VITE_SUPABASE_ANON_KEY || '[MASUKKAN_PUBLISHABLE_KEY_SUPABASE_ANDA]';
+  import.meta.env.VITE_SUPABASE_ANON_KEY || 'sb_publishable_z-P7ucdZVBwh8dH4kcU7Pg_mH6vL9P8';
+
+export const PORTAL_OBE_URL = 'https://obe.simpatti.site';
+
+export const ECOSYSTEM_SUBDOMAINS = {
+  portal: 'https://obe.simpatti.site',
+  kurikulum: 'https://kurikulum.simpatti.site',
+  rps: 'https://rps.simpatti.site',
+  bukuajar: 'https://bukuajar.simpatti.site',
+  rubrik: 'https://rubrik.simpatti.site',
+  portofolio: 'https://portofolio.simpatti.site',
+  cpl: 'https://cpl.simpatti.site',
+  cqi: 'https://cqi.simpatti.site',
+} as const;
 
 export const MODUL_3_SIRUBRIK_URL =
-  import.meta.env.VITE_SIRUBRIK_URL || '[MASUKKAN_URL_MODUL_3_SIRUBRIK]';
+  import.meta.env.VITE_SIRUBRIK_URL || ECOSYSTEM_SUBDOMAINS.rubrik;
 
 export function isSupabaseKeyConfigured(): boolean {
   return (
@@ -19,6 +32,27 @@ export function isSupabaseKeyConfigured(): boolean {
 }
 
 export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+export async function checkSupabaseConnection(): Promise<{
+  connected: boolean;
+  error?: string;
+}> {
+  if (!isSupabaseKeyConfigured()) {
+    return { connected: false, error: 'Publishable key Supabase belum dikonfigurasi.' };
+  }
+  try {
+    const { error } = await supabase.from('obe_rps').select('id').limit(1);
+    if (error) {
+      return { connected: false, error: error.message };
+    }
+    return { connected: true };
+  } catch (err) {
+    return {
+      connected: false,
+      error: err instanceof Error ? err.message : 'Gagal terhubung ke Supabase.',
+    };
+  }
+}
 
 export async function fetchRpsList(): Promise<{ data: RpsSummary[]; error: string | null }> {
   if (!isSupabaseKeyConfigured()) {

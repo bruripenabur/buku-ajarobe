@@ -85,7 +85,15 @@ export function createChapterSkeleton(params: {
   };
 }
 
-export function mapRpsToBookPayload(rps: RpsRecord): PayloadBukuAjar {
+export interface UserBookDefaults {
+  fullName?: string;
+  prodi?: string;
+}
+
+export function mapRpsToBookPayload(
+  rps: RpsRecord,
+  userDefaults?: UserBookDefaults
+): PayloadBukuAjar {
   const p = (rps.payload_rps || {}) as Record<string, any>;
   const currentYear = String(new Date().getFullYear());
 
@@ -332,8 +340,8 @@ export function mapRpsToBookPayload(rps: RpsRecord): PayloadBukuAjar {
       subjudul: `Pendekatan Outcome-Based Education (OBE) Terintegrasi Riset, PkM, dan SDGs`,
       kodeMk: rps.kode_mk || '',
       namaMk: rps.nama_mk || '',
-      timPenulis: rps.dosen_pengampu || '',
-      programStudi: rps.prodi || '',
+      timPenulis: rps.dosen_pengampu || userDefaults?.fullName || '',
+      programStudi: rps.prodi || userDefaults?.prodi || '',
       fakultas: String(p.fakultas || p.identitas?.fakultas || 'Universitas Pattimura'),
       tahunTerbit: currentYear,
       tahunAkademik: rps.tahun_akademik || `${currentYear}/${Number(currentYear) + 1}`,
@@ -341,7 +349,7 @@ export function mapRpsToBookPayload(rps: RpsRecord): PayloadBukuAjar {
       sinopsis: String(p.deskripsi_mk || p.deskripsi || p.sinopsis || ''),
       prakata: '',
       petunjukPenggunaan: '',
-      targetPembaca: `Mahasiswa Program Studi ${rps.prodi || 'Sarjana'} — Universitas Pattimura`,
+      targetPembaca: `Mahasiswa Program Studi ${rps.prodi || userDefaults?.prodi || 'Sarjana'} — Universitas Pattimura`,
     },
     cplList:
       cplList.length > 0
@@ -381,7 +389,7 @@ export function mapRpsToBookPayload(rps: RpsRecord): PayloadBukuAjar {
   };
 }
 
-export function createEmptyManualBook(): PayloadBukuAjar {
+export function createEmptyManualBook(userDefaults?: UserBookDefaults): PayloadBukuAjar {
   const currentYear = String(new Date().getFullYear());
   const babList: BabBukuAjar[] = [];
 
@@ -405,8 +413,8 @@ export function createEmptyManualBook(): PayloadBukuAjar {
       subjudul: 'Buku Ajar Akademik Berbasis Outcome-Based Education (OBE)',
       kodeMk: '',
       namaMk: '',
-      timPenulis: '',
-      programStudi: '',
+      timPenulis: userDefaults?.fullName || '',
+      programStudi: userDefaults?.prodi || '',
       fakultas: 'Universitas Pattimura',
       tahunTerbit: currentYear,
       tahunAkademik: `${currentYear}/${Number(currentYear) + 1}`,
@@ -414,7 +422,7 @@ export function createEmptyManualBook(): PayloadBukuAjar {
       sinopsis: '',
       prakata: '',
       petunjukPenggunaan: '',
-      targetPembaca: 'Mahasiswa Program Sarjana Universitas Pattimura',
+      targetPembaca: `Mahasiswa Program Studi ${userDefaults?.prodi || 'Sarjana'} Universitas Pattimura`,
     },
     cplList: [
       {

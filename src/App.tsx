@@ -3,28 +3,41 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import type { Session, User } from '@supabase/supabase-js';
 import {
   AlertCircle,
   BookOpen,
   CheckCircle2,
   ClipboardList,
+  Database,
   ExternalLink,
   FileText,
   Info,
   Layers,
+  Loader2,
   X,
 } from 'lucide-react';
+import { SsoLockScreen } from './components/SsoLockScreen';
 import { Tab1IdentityMapping } from './components/Tab1IdentityMapping';
 import { Tab2ChapterEditor } from './components/Tab2ChapterEditor';
 import { Tab3EvaluationRefs } from './components/Tab3EvaluationRefs';
 import { Tab4PreviewExport } from './components/Tab4PreviewExport';
 import { TopEcosystemBar } from './components/TopEcosystemBar';
 import {
+  buildModuleHandoffUrl,
+  detectSsoSession,
+  extractSsoUserProfile,
+  signOutSso,
+  syncSsoCookie,
+} from './lib/ssoAuth';
+import {
+  checkSupabaseConnection,
   fetchRpsAndExistingBook,
   fetchRpsList,
   MODUL_3_SIRUBRIK_URL,
   saveBookToEcosystem,
+  supabase,
 } from './lib/supabase';
 import type { PayloadBukuAjar, RpsSummary } from './types/book';
 import { createEmptyManualBook, mapRpsToBookPayload } from './utils/rpsMapper';
@@ -37,13 +50,23 @@ interface ToastState {
 }
 
 export default function App() {
+  const [isCheckingSso, setIsCheckingSso] = useState<boolean>(true);
+  const [session, setSession] = useState<Session | null>(null);
+  const [authUser, setAuthUser] = useState<User | null>(null);
+
+  const [dbStatus, setDbStatus] = useState<{
+    checked: boolean;
+    connected: boolean;
+    error?: string;
+  }>({ checked: false, connected: false });
+
   const [activeTab, setActiveTab] = useState<TabKey>('tab1');
   const [rpsList, setRpsList] = useState<RpsSummary[]>([]);
   const [selectedRpsId, setSelectedRpsId] = useState<string | null>(null);
   const [isManualMode, setIsManualMode] = useState<boolean>(true);
   const [hasExistingDraft, setHasExistingDraft] = useState<boolean>(false);
 
-  const [isLoadingRpsList, setIsLoadingRpsList] = useState<boolean>(true);
+  const [isLoadingRpsList, setIsLoadingRpsList] = useState<boolean>(false);
   const [isLoadingSelectedRps, setIsLoadingSelectedRps] = useState<boolean>(false);
   const [isSaving, setIsSaving] = useState<boolean>(false);
 
@@ -52,6 +75,8 @@ export default function App() {
   const [handoffModalUrl, setHandoffModalUrl] = useState<string | null>(null);
 
   const [book, setBook] = useState<PayloadBukuAjar>(() => createEmptyManualBook());
+
+  const userProfile = useMemo(() => extractSsoUserProfile(authUser), [authUser]);
 
   const notify = (type: ToastState['type'], message: string) => {
     setToast({ type, message });
@@ -63,7 +88,87 @@ export default function App() {
     return () => clearTimeout(timer);
   }, [toast]);
 
-  const handleLoadRpsById = async (rpsId: string) => {
+  // 1. Deteksi Sesi SSO Otomatis + Listener Auth
+  useEffect(() => {
+    let mounted = true;
+
+    async function initAuthAndConnection() {
+      setIsCheckingSso(true);
+      const [ssoRes, connRes] = await Promise.all([
+        detectSsoSession(),
+        checkSupabaseConnection(),
+      ]);
+
+      if (!mounted) return;
+      setDbStatus({
+        checked: true,
+        connected: connRes.connected,
+        error: connRes.error,
+      });
+
+      if (ssoRes.session && ssoRes.user) {
+        setSession(ssoRes.session);
+        setAuthUser(ssoRes.user);
+      }
+      setIsCheckingSso(false);
+    }
+
+    initAuthAndConnection();
+
+    const { data: authListener } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      if (!mounted) return;
+      setSession(nextSession);
+      setAuthUser(nextSession?.user ?? null);
+      if (nextSession) {
+        syncSsoCookie(nextSession);
+      }
+    });
+
+    return () => {
+      mounted = false;
+      authListener.subscription.unsubscribe();
+    };
+  }, []);
+
+  // Auto-fill Tim Penulis & Program Studi dari metadata pengguna SSO
+  useEffect(() => {
+    if (!authUser) return;
+    const profile = extractSsoUserProfile(authUser);
+    if (!profile.fullName && !profile.prodi) return;
+
+    setBook((prev) => {
+      const nextPenulis = prev.identitas.timPenulis.trim()
+        ? prev.identitas.timPenulis
+        : profile.fullName;
+      const nextProdi = prev.identitas.programStudi.trim()
+        ? prev.identitas.programStudi
+        : profile.prodi;
+      const nextTarget =
+        profile.prodi && prev.identitas.targetPembaca === 'Mahasiswa Program Sarjana Universitas Pattimura'
+          ? `Mahasiswa Program Studi ${profile.prodi} Universitas Pattimura`
+          : prev.identitas.targetPembaca;
+
+      if (
+        nextPenulis === prev.identitas.timPenulis &&
+        nextProdi === prev.identitas.programStudi &&
+        nextTarget === prev.identitas.targetPembaca
+      ) {
+        return prev;
+      }
+
+      return {
+        ...prev,
+        identitas: {
+          ...prev.identitas,
+          timPenulis: nextPenulis,
+          programStudi: nextProdi,
+          targetPembaca: nextTarget,
+        },
+      };
+    });
+  }, [authUser]);
+
+  const handleLoadRpsById = async (rpsId: string, currentUser?: User | null) => {
     setIsLoadingSelectedRps(true);
     setSelectedRpsId(rpsId);
     setIsManualMode(false);
@@ -87,7 +192,11 @@ export default function App() {
     }
 
     if (rps) {
-      const mapped = mapRpsToBookPayload(rps);
+      const profile = extractSsoUserProfile(currentUser ?? authUser);
+      const mapped = mapRpsToBookPayload(rps, {
+        fullName: profile.fullName,
+        prodi: profile.prodi,
+      });
       setBook(mapped);
       setHasExistingDraft(false);
       notify(
@@ -97,11 +206,12 @@ export default function App() {
     }
   };
 
-  // Load upstream obe_rps list & check ?rps_id=... URL query param on mount
+  // Tarik daftar obe_rps & cek parameter ?rps_id=... setelah SSO aktif
   useEffect(() => {
+    if (!session) return;
     let mounted = true;
 
-    async function init() {
+    async function loadEcosystemData() {
       setIsLoadingRpsList(true);
       const { data, error } = await fetchRpsList();
       if (!mounted) return;
@@ -112,27 +222,36 @@ export default function App() {
       } else {
         setSupabaseNotice(null);
         setRpsList(data);
+        setDbStatus({ checked: true, connected: true });
       }
 
       const params = new URLSearchParams(window.location.search);
       const urlRpsId = params.get('rps_id');
       if (urlRpsId) {
-        await handleLoadRpsById(urlRpsId);
+        await handleLoadRpsById(urlRpsId, session?.user);
       }
     }
 
-    init();
+    loadEcosystemData();
     return () => {
       mounted = false;
     };
-  }, []);
+  }, [session]);
 
   const handleSwitchManual = () => {
     setSelectedRpsId(null);
     setIsManualMode(true);
     setHasExistingDraft(false);
-    setBook(createEmptyManualBook());
-    notify('info', 'Mode Input Manual aktif. Anda dapat menyusun buku ajar dari awal tanpa RPS.');
+    setBook(
+      createEmptyManualBook({
+        fullName: userProfile.fullName,
+        prodi: userProfile.prodi,
+      })
+    );
+    notify(
+      'info',
+      'Mode Input Manual aktif. Identitas penulis dan program studi diisi otomatis dari profil SSO Anda.'
+    );
   };
 
   const handleSaveAndContinue = async () => {
@@ -158,7 +277,7 @@ export default function App() {
     }
 
     const rpsParam = selectedRpsId || savedId || '';
-    const targetUrl = `${MODUL_3_SIRUBRIK_URL}?rps_id=${encodeURIComponent(rpsParam)}`;
+    const targetUrl = buildModuleHandoffUrl(MODUL_3_SIRUBRIK_URL, rpsParam, session);
 
     notify(
       'success',
@@ -174,12 +293,47 @@ export default function App() {
     }
   };
 
+  const handleSignOut = async () => {
+    await signOutSso();
+    setSession(null);
+    setAuthUser(null);
+  };
+
   const tabs: Array<{ key: TabKey; label: string; icon: typeof BookOpen }> = [
     { key: 'tab1', label: '1. Identitas, Prakata & Peta CPL', icon: BookOpen },
     { key: 'tab2', label: '2. Generator & Editor Per Bab', icon: Layers },
     { key: 'tab3', label: '3. Kisi-Kisi TIU-TKD & Pustaka', icon: ClipboardList },
     { key: 'tab4', label: '4. Pratinjau Manuskrip & Ekspor', icon: FileText },
   ];
+
+  // Layar tunggu saat memeriksa sesi SSO
+  if (isCheckingSso) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center p-6">
+        <div className="bg-white border border-slate-200 rounded-xl px-6 py-5 flex items-center gap-3 shadow-sm">
+          <Loader2 className="w-5 h-5 animate-spin text-[#0b3d91]" />
+          <span className="text-sm font-semibold text-slate-800">
+            Memeriksa sesi Single Sign-On (SSO) Ekosistem SIMPEL-OBE...
+          </span>
+        </div>
+      </div>
+    );
+  }
+
+  // Layar kunci SSO jika belum login
+  if (!session || !authUser) {
+    return (
+      <>
+        <SsoLockScreen
+          onAuthenticated={(newSession, newUser) => {
+            setSession(newSession);
+            setAuthUser(newUser);
+          }}
+        />
+        <DbConnectionStatusBadge dbStatus={dbStatus} />
+      </>
+    );
+  }
 
   return (
     <div className="min-h-screen flex flex-col bg-slate-50 text-slate-900">
@@ -191,9 +345,11 @@ export default function App() {
         isLoadingSelectedRps={isLoadingSelectedRps}
         isSaving={isSaving}
         hasExistingDraft={hasExistingDraft}
-        onSelectRps={handleLoadRpsById}
+        userProfile={userProfile}
+        onSelectRps={(id) => handleLoadRpsById(id)}
         onSwitchManual={handleSwitchManual}
         onSaveAndContinue={handleSaveAndContinue}
+        onSignOut={handleSignOut}
       />
 
       {/* Tab Navigation Bar */}
@@ -287,7 +443,7 @@ export default function App() {
 
       {/* Toast Notification */}
       {toast && (
-        <div className="no-print fixed bottom-5 right-5 z-50 max-w-md rounded-xl border bg-white shadow-lg p-4 flex items-start gap-3 border-slate-200">
+        <div className="no-print fixed bottom-16 right-5 z-50 max-w-md rounded-xl border bg-white shadow-lg p-4 flex items-start gap-3 border-slate-200">
           {toast.type === 'success' && (
             <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0 mt-0.5" />
           )}
@@ -308,7 +464,7 @@ export default function App() {
         </div>
       )}
 
-      {/* Handoff Confirmation Modal when MODUL_3_SIRUBRIK_URL placeholder is still active */}
+      {/* Handoff Confirmation Modal */}
       {handoffModalUrl && (
         <div className="no-print fixed inset-0 z-50 bg-slate-900/50 flex items-center justify-center p-4">
           <div className="bg-white border border-slate-200 rounded-xl max-w-lg w-full p-6 space-y-4 shadow-xl">
@@ -328,15 +484,16 @@ export default function App() {
               </button>
             </div>
             <p className="text-sm text-slate-700 leading-relaxed">
-              Data buku ajar telah disimpan ke tabel <code className="font-mono text-xs bg-slate-100 px-1.5 py-0.5 rounded">obe_buku_ajar</code> dan status siklus RPS diperbarui menjadi <code className="font-mono text-xs bg-slate-100 px-1.5 py-0.5 rounded">2_buku_selesai</code>.
+              Data buku ajar telah disimpan ke tabel{' '}
+              <code className="font-mono text-xs bg-slate-100 px-1.5 py-0.5 rounded">
+                obe_buku_ajar
+              </code>{' '}
+              dan status siklus RPS diperbarui menjadi{' '}
+              <code className="font-mono text-xs bg-slate-100 px-1.5 py-0.5 rounded">
+                2_buku_selesai
+              </code>
+              .
             </p>
-            <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs text-slate-700 space-y-1">
-              <p className="font-semibold">URL Tujuan Estafet Modul 3 (SIRUBRIK):</p>
-              <p className="font-mono break-all text-[#0b3d91]">{handoffModalUrl}</p>
-              <p className="text-slate-500 pt-1">
-                Atur <code className="font-mono">VITE_SIRUBRIK_URL</code> atau ganti placeholder <code className="font-mono">[MASUKKAN_URL_MODUL_3_SIRUBRIK]</code> di <code className="font-mono">src/lib/supabase.ts</code> untuk pengalihan otomatis.
-              </p>
-            </div>
             <div className="flex justify-end gap-2 pt-2">
               <button
                 type="button"
@@ -359,6 +516,34 @@ export default function App() {
           </div>
         </div>
       )}
+
+      <DbConnectionStatusBadge dbStatus={dbStatus} />
+    </div>
+  );
+}
+
+function DbConnectionStatusBadge({
+  dbStatus,
+}: {
+  dbStatus: { checked: boolean; connected: boolean; error?: string };
+}) {
+  if (!dbStatus.checked) return null;
+
+  return (
+    <div
+      title={dbStatus.error || 'Terhubung ke Supabase SIMPEL-OBE'}
+      className={`no-print fixed bottom-3.5 right-4 z-40 inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs font-medium shadow-sm ${
+        dbStatus.connected
+          ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+          : 'bg-red-50 border-red-200 text-red-800'
+      }`}
+    >
+      <Database className="w-3.5 h-3.5 shrink-0" />
+      <span>
+        {dbStatus.connected
+          ? 'Supabase Connected (SIMPEL-OBE DB)'
+          : `Supabase Disconnected${dbStatus.error ? `: ${dbStatus.error}` : ''}`}
+      </span>
     </div>
   );
 }
