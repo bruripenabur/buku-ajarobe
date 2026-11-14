@@ -1,0 +1,8 @@
+{
+  "name": "SIMPEL-OBE 02 | Penyusunan Buku Ajar Akademik Berbasis OBE",
+  "description": "Pengembangan Naskah Buku Ajar Berbasis RPS OBE, Integrasi Riset/PkM/SDGs & Evaluasi TIU-TKD untuk Pusat Kurikulum dan Inovasi Pembelajaran - Universitas Pattimura.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
